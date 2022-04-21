@@ -1,29 +1,42 @@
 package mr
 
-import "log"
+import (
+	"log"
+	"sync"
+)
 import "net"
 import "os"
 import "net/rpc"
 import "net/http"
 
-
 type Coordinator struct {
 	// Your definitions here.
+	lock           sync.Mutex // 读写锁
+	stage          int        // 当前执行阶段
+	nMap           int        // map任务数
+	nReduce        int        // reduce任务数
+	availableTasks chan Task  // 未分配的task池
+}
 
+const (
+	Map    = "m"
+	Reduce = "r"
+)
+
+type Task struct {
+	taskType string // 任务类型
+	file     string // 文件
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
-//
+// Example
 // an example RPC handler.
-//
 // the RPC argument and reply types are defined in rpc.go.
-//
 func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
 }
-
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -50,20 +63,17 @@ func (c *Coordinator) Done() bool {
 
 	// Your code here.
 
-
 	return ret
 }
 
-//
+// MakeCoordinator
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
-//
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
 	// Your code here.
-
 
 	c.server()
 	return &c
