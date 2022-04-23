@@ -23,9 +23,13 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+type ApplyReq struct {
+}
 
+type ApplyResp struct {
+}
 
-// Cook up a unique-ish UNIX-domain socket name
+// Cook up a unique-ish UNIX-domain socket taskName
 // in /var/tmp, for the coordinator.
 // Can't use the current directory since
 // Athena AFS doesn't support UNIX-domain sockets.

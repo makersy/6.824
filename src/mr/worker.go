@@ -1,14 +1,30 @@
 package mr
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
 
+/*
+worker 的工作：
+1. 向 coordinator 发送rpc，申请任务
+2. 拿到返回值
+	- 如果返回空，那么说明所有任务已被执行完，结束worker
+	- 如果返回了一个 Map 任务，那么：
+		- 读取输入文件的内容
+		- 调用 Map 函数拿到中间数据
+		- 对中间数据的每个 key 调用 hash，根据 hash 值将 kv 对分配到对应的 reduce 任务，保存到该 reduce 任务对应的中间文件
+	- 如果返回了一个 Reduce 任务，那么：
+		- 读取该任务对应的中间文件
+		- 按 key 进行归并、排序
+		- 输出最终结果到 reduce 文件
+*/
 
-//
+// KeyValue
 // Map functions return a slice of KeyValue.
-//
 type KeyValue struct {
 	Key   string
 	Value string
@@ -24,7 +40,6 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
@@ -38,11 +53,14 @@ func Worker(mapf func(string, string) []KeyValue,
 
 }
 
-//
+func tmpFile(prefix, taskType string, taskId int) (*os.File, error) {
+	os.Open("")
+	return os.Create(fmt.Sprintf("%v-%v-%v", prefix, taskType, taskId))
+}
+
+// CallExample
 // example function to show how to make an RPC call to the coordinator.
-//
 // the RPC argument and reply types are defined in rpc.go.
-//
 func CallExample() {
 
 	// declare an argument structure.

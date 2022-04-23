@@ -1,34 +1,101 @@
 package mr
 
 import (
+	"6.824/util"
+	"fmt"
 	"log"
 	"sync"
+	"time"
 )
 import "net"
 import "os"
 import "net/rpc"
 import "net/http"
 
+/*
+主要功能：
+- 分配任务
+- 发现过期worker并重新分配对应任务
+
+*/
+
 type Coordinator struct {
 	// Your definitions here.
-	lock           sync.Mutex // 读写锁
-	stage          int        // 当前执行阶段
-	nMap           int        // map任务数
-	nReduce        int        // reduce任务数
-	availableTasks chan Task  // 未分配的task池
+	mu        sync.Mutex      // 读写锁
+	phase     string          // 当前执行阶段
+	nMap      int             // map任务数
+	nReduce   int             // reduce任务数
+	aliveTask map[string]Task // 进行中的任务
+	newTasks  chan Task       // 未分配的task池
 }
 
 const (
-	Map    = "m"
-	Reduce = "r"
+	Map    = "M"
+	Reduce = "R"
 )
 
 type Task struct {
-	taskType string // 任务类型
-	file     string // 文件
+	taskType string    // 任务类型
+	taskName string    // 任务名，基于 type 和 index 唯一生成
+	file     string    // 文件名
+	workerId int       // 执行的worker id
+	ddl      time.Time // 预期完成时间
 }
 
 // Your code here -- RPC handlers for the worker to call.
+
+// MakeCoordinator
+// create a Coordinator.
+// main/mrcoordinator.go calls this function.
+// nReduce is the number of reduce tasks to use.
+func MakeCoordinator(files []string, nReduce int) *Coordinator {
+	c := Coordinator{
+		mu:        sync.Mutex{},
+		phase:     Map,
+		nMap:      len(files),
+		nReduce:   nReduce,
+		aliveTask: make(map[string]Task),
+		newTasks:  make(chan Task, util.Max(len(files), nReduce)),
+	}
+
+	// 生成Map任务
+	for i, f := range files {
+		t := Task{
+			taskType: Map,
+			file:     f,
+			taskName: fmt.Sprintf("%v-%v", Map, i),
+		}
+		c.newTasks <- t
+	}
+
+	// 监听
+	c.server()
+
+	// 定期检查超时任务
+	go func() {
+		time.Sleep(1 * time.Second)
+		c.checkDdl()
+	}()
+
+	return &c
+}
+
+// 检查超时的任务，使其失效并重新加入任务池
+func (c *Coordinator) checkDdl() {
+	for _, t := range c.aliveTask {
+		if t.taskName != "" && t.ddl.After(time.Now()) {
+			c.mu.Lock()
+
+			log.Printf("Found time-out task, type: %s, taskName: %s, workerId: %d, ", t.taskType, t.taskName, t.workerId)
+			delete(c.aliveTask, t.taskName)
+			t.workerId = -1
+			t.taskName = ""
+			c.newTasks <- t
+
+			c.mu.Unlock()
+		}
+	}
+}
 
 // Example
 // an example RPC handler.
@@ -64,17 +131,4 @@ func (c *Coordinator) Done() bool {
 	// Your code here.
 
 	return ret
-}
-
-// MakeCoordinator
-// create a Coordinator.
-// main/mrcoordinator.go calls this function.
-// nReduce is the number of reduce tasks to use.
-func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
-
-	// Your code here.
-
-	c.server()
-	return &c
 }
