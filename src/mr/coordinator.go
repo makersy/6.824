@@ -25,7 +25,7 @@ type Coordinator struct {
 	phase     string          // 当前执行阶段
 	nMap      int             // map任务数
 	nReduce   int             // reduce任务数
-	aliveTask map[string]Task // 进行中的任务
+	aliveTask map[string]Task // 进行中的任务 key:taskName
 	newTasks  chan Task       // 未分配的task池
 }
 
@@ -35,14 +35,13 @@ const (
 )
 
 type Task struct {
-	taskType string    // 任务类型
-	taskName string    // 任务名，基于 type 和 index 唯一生成
-	file     string    // 文件名
-	workerId int       // 执行的worker id
-	ddl      time.Time // 预期完成时间
+	taskType  string    // 任务类型
+	index     int       // 任务生成时的排序
+	taskName  string    // 任务名，type-index，全局唯一
+	inputFile string    // 需要读取的文件
+	workerId  string    // 任务对应的 worker id
+	ddl       time.Time // 预期完成时间
 }
-
-// Your code here -- RPC handlers for the worker to call.
 
 // MakeCoordinator
 // create a Coordinator.
@@ -61,9 +60,10 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// 生成Map任务
 	for i, f := range files {
 		t := Task{
-			taskType: Map,
-			file:     f,
-			taskName: fmt.Sprintf("%v-%v", Map, i),
+			taskType:  Map,
+			inputFile: f,
+			index:     i,
+			taskName:  fmt.Sprintf("%v-%v", Map, i),
 		}
 		c.newTasks <- t
 	}
@@ -86,16 +86,58 @@ func (c *Coordinator) checkDdl() {
 		if t.taskName != "" && t.ddl.After(time.Now()) {
 			c.mu.Lock()
 
-			log.Printf("Found time-out task, type: %s, taskName: %s, workerId: %d, ", t.taskType, t.taskName, t.workerId)
+			log.Printf("Found time-out task, type: %s, taskName: %s, workerId: %s, ", t.taskType, t.taskName, t.workerId)
 			delete(c.aliveTask, t.taskName)
-			t.workerId = -1
-			t.taskName = ""
+			t.workerId = ""
+			t.ddl = time.Time{}
 			c.newTasks <- t
 
 			c.mu.Unlock()
 		}
 	}
 }
+
+// todo
+//ApplyForTask 如果没有任务，返回一个空的标志，告知worker可以停止
+func (c *Coordinator) ApplyForTask(args *ApplyTaskArgs, reply *ApplyTaskReply) error {
+	t, ok := <-c.newTasks
+	if !ok {
+		reply.end = true
+		return nil
+	}
+
+	c.mu.Lock()
+
+	t.workerId = args.workerId
+	t.ddl = time.Now().Add(10 * time.Second)
+	c.aliveTask[t.taskName] = t
+
+	c.mu.Unlock()
+
+	reply.nMap = c.nMap
+	reply.nReduce = c.nReduce
+	reply.end = false
+
+	return nil
+}
+
+//NotifyFinished worker通知master任务已完成
+func (c *Coordinator) NotifyFinished(args *NotifyFinishArgs, reply *NotifyFinishReply) error {
+	//if args == nil {
+	//	return errors.New("nil args")
+	//}
+	//if reply == nil {
+	//	return errors.New("nil reply")
+	//}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// 如果未超时，返回成功。否则视为失败，重新分配该任务
+
+	return nil
+}
+
+// 输出文件格式 mr-out-X
 
 // Example
 // an example RPC handler.
@@ -126,9 +168,9 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	ret := false
+	if c.phase == "" {
+		return true
+	}
 
-	// Your code here.
-
-	return ret
+	return false
 }

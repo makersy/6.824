@@ -23,10 +23,25 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
-type ApplyReq struct {
+type ApplyTaskArgs struct {
+	workerId string
 }
 
-type ApplyResp struct {
+type ApplyTaskReply struct {
+	taskType  string
+	taskIndex int
+	inputFile string
+	nMap      int  // 获取map中间文件使用
+	nReduce   int  // hash使用
+	end       bool // 是否已结束
+}
+
+type NotifyFinishArgs struct {
+	taskType  string
+	taskIndex int
+}
+
+type NotifyFinishReply struct {
 }
 
 // Cook up a unique-ish UNIX-domain socket taskName
