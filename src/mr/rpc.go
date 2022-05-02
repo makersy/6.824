@@ -39,9 +39,11 @@ type ApplyTaskReply struct {
 type NotifyFinishArgs struct {
 	taskType  string
 	taskIndex int
+	workId    string
 }
 
 type NotifyFinishReply struct {
+	success bool
 }
 
 // Cook up a unique-ish UNIX-domain socket taskName

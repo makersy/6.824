@@ -97,7 +97,6 @@ func (c *Coordinator) checkDdl() {
 	}
 }
 
-// todo
 //ApplyForTask 如果没有任务，返回一个空的标志，告知worker可以停止
 func (c *Coordinator) ApplyForTask(args *ApplyTaskArgs, reply *ApplyTaskReply) error {
 	t, ok := <-c.newTasks
