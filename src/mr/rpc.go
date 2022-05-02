@@ -29,9 +29,9 @@ type ApplyTaskArgs struct {
 
 type ApplyTaskReply struct {
 	taskType  string
-	taskIndex int
-	inputFile string
-	nMap      int  // 获取map中间文件使用
+	taskIndex  int
+	inputFiles []string
+	nMap       int  // 获取map中间文件使用
 	nReduce   int  // hash使用
 	end       bool // 是否已结束
 }
@@ -40,6 +40,7 @@ type NotifyFinishArgs struct {
 	taskType  string
 	taskIndex int
 	workId    string
+	tmpFiles  []string // 生成的临时文件名称
 }
 
 type NotifyFinishReply struct {

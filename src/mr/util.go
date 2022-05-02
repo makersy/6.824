@@ -3,25 +3,25 @@ package mr
 import "fmt"
 
 const (
-	mTempFilePrefix = "mr-map-temp"
-	mFilePrefix     = "mr-map"
+	mTempFilePrefix = "mr-mapout-temp"
+	mFilePrefix     = "mr-mapout"
 	rTempFilePrefix = "mr-out-temp"
 	rFilePrefix     = "mr-out"
 )
 
 // temp文件命名需要带上workerId：防止多个worker执行了同个任务，写文件出现冲突
-func tempMapOutFile(workerId string, mTaskIdx, rTaskIdx int) string {
-	return fmt.Sprintf("%v-%v-%v-%v", mTempFilePrefix, workerId, mTaskIdx, rTaskIdx)
+func tempMOutFileName(workerId string) string {
+	return fmt.Sprintf("%v-%v-*", mTempFilePrefix, workerId)
 }
 
-func mapOutFile(mTaskIdx, rTaskIdx int) string {
+func mOutFileName(mTaskIdx, rTaskIdx int) string {
 	return fmt.Sprintf("%v-%v-%v", mFilePrefix, mTaskIdx, rTaskIdx)
 }
 
-func tempReduceOutFile(workerId string, rTaskIdx int) string {
-	return fmt.Sprintf("%v-%v-%v", rTempFilePrefix, workerId, rTaskIdx)
+func tempROutFile(workerId string) string {
+	return fmt.Sprintf("%v-%v-*", rTempFilePrefix, workerId)
 }
 
-func reduceOutFile(rTaskIdx int) string {
+func rOutFileName(rTaskIdx int) string {
 	return fmt.Sprintf("%v-%v", rFilePrefix, rTaskIdx)
 }

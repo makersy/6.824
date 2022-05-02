@@ -21,12 +21,13 @@ import "net/http"
 
 type Coordinator struct {
 	// Your definitions here.
-	mu        sync.Mutex      // 读写锁
-	phase     string          // 当前执行阶段
-	nMap      int             // map任务数
-	nReduce   int             // reduce任务数
-	aliveTask map[string]Task // 进行中的任务 key:genTaskName
-	newTasks  chan Task       // 未分配的task池
+	mu          sync.Mutex       // 读写锁
+	phase       string           // 当前执行阶段
+	nMap        int              // map任务数
+	nReduce     int              // reduce任务数
+	aliveTask   map[string]Task  // 进行中的任务 key:genTaskName
+	newTasks    chan Task        // 未分配的task池
+	mapOutFiles map[int][]string // map任务生成的中间文件。key: reduce task index，value: intermediate files
 }
 
 const (
@@ -35,12 +36,12 @@ const (
 )
 
 type Task struct {
-	taskType  string    // 任务类型
-	index     int       // 任务生成时的排序
-	taskName  string    // 任务名，type-index，全局唯一
-	inputFile string    // 需要读取的文件
-	workerId  string    // 任务对应的 worker id
-	ddl       time.Time // 预期完成时间
+	taskType   string    // 任务类型
+	index      int       // 任务生成时的排序
+	taskName   string    // 任务名，type-index，全局唯一
+	inputFiles []string  // 需要读取的文件
+	workerId   string    // 任务对应的 worker id
+	ddl        time.Time // 预期完成时间
 }
 
 // MakeCoordinator
@@ -55,15 +56,16 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		nReduce:   nReduce,
 		aliveTask: make(map[string]Task),
 		newTasks:  make(chan Task, util.Max(len(files), nReduce)),
+		mapOutFiles: make(map[int][]string, nReduce),
 	}
 
 	// 生成Map任务
 	for i, f := range files {
 		t := Task{
-			taskType:  Map,
-			inputFile: f,
-			index:     i,
-			taskName:  genTaskName(Map, i),
+			taskType:   Map,
+			inputFiles: []string{f},
+			index:      i,
+			taskName:   genTaskName(Map, i),
 		}
 		c.newTasks <- t
 	}
@@ -91,18 +93,18 @@ func (c *Coordinator) checkDdl() {
 			c.mu.Lock()
 
 			log.Printf("Found time-out task, type: %s, genTaskName: %s, workerId: %s", t.taskType, t.taskName, t.workerId)
-			c.deleteAndRebuildTask(t)
+			c.deleteAndRebuildTask(&t)
 
 			c.mu.Unlock()
 		}
 	}
 }
 
-func (c *Coordinator) deleteAndRebuildTask(t Task) {
+func (c *Coordinator) deleteAndRebuildTask(t *Task) {
 	delete(c.aliveTask, t.taskName)
 	t.workerId = ""
 	t.ddl = time.Time{}
-	c.newTasks <- t
+	c.newTasks <- *t
 }
 
 //ApplyForTask 如果所有任务都已被成功执行，则返回end=true，告知worker可以停止
@@ -119,11 +121,14 @@ func (c *Coordinator) ApplyForTask(args *ApplyTaskArgs, reply *ApplyTaskReply) e
 	t.ddl = time.Now().Add(10 * time.Second)
 	c.aliveTask[t.taskName] = t
 
-	c.mu.Unlock()
-
+	reply.taskIndex = t.index
+	reply.taskType = t.taskType
+	reply.inputFiles = t.inputFiles
 	reply.nMap = c.nMap
 	reply.nReduce = c.nReduce
 	reply.end = false
+
+	c.mu.Unlock()
 
 	return nil
 }
@@ -131,6 +136,12 @@ func (c *Coordinator) ApplyForTask(args *ApplyTaskArgs, reply *ApplyTaskReply) e
 //NotifyFinished worker通知master任务已完成。如果当前阶段所有任务均已完成，切换master执行阶段
 func (c *Coordinator) NotifyFinished(args *NotifyFinishArgs, reply *NotifyFinishReply) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(args.tmpFiles) == 0 {
+		reply.success = false
+		return nil
+	}
 
 	// 如果未超时，返回成功。否则视为失败，重新分配该任务
 	task, ok := c.aliveTask[genTaskName(args.taskType, args.taskIndex)]
@@ -143,31 +154,36 @@ func (c *Coordinator) NotifyFinished(args *NotifyFinishArgs, reply *NotifyFinish
 
 	// 超时
 	if time.Now().After(task.ddl) {
-		c.deleteAndRebuildTask(task)
+		c.deleteAndRebuildTask(&task)
 	}
 
-	// 执行成功，将中间文件转正
+	// 将中间文件转正
 	switch task.taskType {
 	case Map:
-		for i := 0; i < c.nReduce; i++ {
-			tempName := tempMapOutFile(args.workId, args.taskIndex, i)
-			name := mapOutFile(args.taskIndex, i)
-			err := os.Rename(tempName, name)
+		for i, tmpFile := range args.tmpFiles {
+			if tmpFile == "" {
+				log.Printf("Found nil temp map file. workerId: %s, map index: %v, reduce index: %v",
+					args.workId, args.taskIndex, i)
+				continue
+			}
+			name := mOutFileName(args.taskIndex, i)
+			err := os.Rename(tmpFile, name)
 			if err != nil {
-				log.Printf("Failed to rename map file from %s to %s", tempName, name)
-				c.deleteAndRebuildTask(task)
+				log.Printf("Failed to rename map file from %s to %s", tmpFile, name)
+				c.deleteAndRebuildTask(&task)
 				reply.success = false
 				return nil
 			}
+			c.mapOutFiles[i] = append(c.mapOutFiles[i], name)
 		}
 		break
 	case Reduce:
-		tempName := tempReduceOutFile(args.workId, args.taskIndex)
-		name := reduceOutFile(args.taskIndex)
+		tempName := args.tmpFiles[0]
+		name := rOutFileName(args.taskIndex)
 		err := os.Rename(tempName, name)
 		if err != nil {
 			log.Printf("Failed to rename reduce file from %s to %s", tempName, name)
-			c.deleteAndRebuildTask(task)
+			c.deleteAndRebuildTask(&task)
 			reply.success = false
 			return nil
 		}
@@ -178,8 +194,6 @@ func (c *Coordinator) NotifyFinished(args *NotifyFinishArgs, reply *NotifyFinish
 
 	delete(c.aliveTask, task.taskName)
 	reply.success = true
-
-	c.mu.Unlock()
 
 	if len(c.aliveTask) == 0 {
 		// 新开一个协程去切状态，不增加此次rpc时间
@@ -198,10 +212,11 @@ func (c *Coordinator) changePhase() {
 	case Map:
 		for i := 0; i < c.nReduce; i++ {
 			t := Task{
-				taskType: Reduce,
-				index:    i,
-				taskName: genTaskName(Reduce, i),
-				ddl:      time.Now().Add(10 * time.Second),
+				taskType:   Reduce,
+				index:      i,
+				taskName:   genTaskName(Reduce, i),
+				inputFiles: c.mapOutFiles[i],
+				ddl:        time.Now().Add(10 * time.Second),
 			}
 			c.newTasks <- t
 		}
