@@ -25,7 +25,7 @@ type Coordinator struct {
 	phase     string          // 当前执行阶段
 	nMap      int             // map任务数
 	nReduce   int             // reduce任务数
-	aliveTask map[string]Task // 进行中的任务 key:taskName
+	aliveTask map[string]Task // 进行中的任务 key:genTaskName
 	newTasks  chan Task       // 未分配的task池
 }
 
@@ -63,7 +63,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			taskType:  Map,
 			inputFile: f,
 			index:     i,
-			taskName:  fmt.Sprintf("%v-%v", Map, i),
+			taskName:  genTaskName(Map, i),
 		}
 		c.newTasks <- t
 	}
@@ -73,11 +73,15 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	// 定期检查超时任务
 	go func() {
-		time.Sleep(1 * time.Second)
+		time.Sleep(500 * time.Millisecond)
 		c.checkDdl()
 	}()
 
 	return &c
+}
+
+func genTaskName(taskType string, index int) string {
+	return fmt.Sprintf("%v-%v", taskType, index)
 }
 
 // 检查超时的任务，使其失效并重新加入任务池
@@ -86,18 +90,22 @@ func (c *Coordinator) checkDdl() {
 		if t.taskName != "" && t.ddl.After(time.Now()) {
 			c.mu.Lock()
 
-			log.Printf("Found time-out task, type: %s, taskName: %s, workerId: %s, ", t.taskType, t.taskName, t.workerId)
-			delete(c.aliveTask, t.taskName)
-			t.workerId = ""
-			t.ddl = time.Time{}
-			c.newTasks <- t
+			log.Printf("Found time-out task, type: %s, genTaskName: %s, workerId: %s", t.taskType, t.taskName, t.workerId)
+			c.deleteAndRebuildTask(t)
 
 			c.mu.Unlock()
 		}
 	}
 }
 
-//ApplyForTask 如果没有任务，返回一个空的标志，告知worker可以停止
+func (c *Coordinator) deleteAndRebuildTask(t Task) {
+	delete(c.aliveTask, t.taskName)
+	t.workerId = ""
+	t.ddl = time.Time{}
+	c.newTasks <- t
+}
+
+//ApplyForTask 如果所有任务都已被成功执行，则返回end=true，告知worker可以停止
 func (c *Coordinator) ApplyForTask(args *ApplyTaskArgs, reply *ApplyTaskReply) error {
 	t, ok := <-c.newTasks
 	if !ok {
@@ -120,20 +128,92 @@ func (c *Coordinator) ApplyForTask(args *ApplyTaskArgs, reply *ApplyTaskReply) e
 	return nil
 }
 
-//NotifyFinished worker通知master任务已完成
+//NotifyFinished worker通知master任务已完成。如果当前阶段所有任务均已完成，切换master执行阶段
 func (c *Coordinator) NotifyFinished(args *NotifyFinishArgs, reply *NotifyFinishReply) error {
-	//if args == nil {
-	//	return errors.New("nil args")
-	//}
-	//if reply == nil {
-	//	return errors.New("nil reply")
-	//}
+	c.mu.Lock()
+
+	// 如果未超时，返回成功。否则视为失败，重新分配该任务
+	task, ok := c.aliveTask[genTaskName(args.taskType, args.taskIndex)]
+
+	// 任务池没有，说明已经被后台任务认定超时，删除掉了
+	if !ok {
+		reply.success = false
+		return nil
+	}
+
+	// 超时
+	if time.Now().After(task.ddl) {
+		c.deleteAndRebuildTask(task)
+	}
+
+	// 执行成功，将中间文件转正
+	switch task.taskType {
+	case Map:
+		for i := 0; i < c.nReduce; i++ {
+			tempName := tempMapOutFile(args.workId, args.taskIndex, i)
+			name := mapOutFile(args.taskIndex, i)
+			err := os.Rename(tempName, name)
+			if err != nil {
+				log.Printf("Failed to rename map file from %s to %s", tempName, name)
+				c.deleteAndRebuildTask(task)
+				reply.success = false
+				return nil
+			}
+		}
+		break
+	case Reduce:
+		tempName := tempReduceOutFile(args.workId, args.taskIndex)
+		name := reduceOutFile(args.taskIndex)
+		err := os.Rename(tempName, name)
+		if err != nil {
+			log.Printf("Failed to rename reduce file from %s to %s", tempName, name)
+			c.deleteAndRebuildTask(task)
+			reply.success = false
+			return nil
+		}
+		break
+	default:
+		break
+	}
+
+	delete(c.aliveTask, task.taskName)
+	reply.success = true
+
+	c.mu.Unlock()
+
+	if len(c.aliveTask) == 0 {
+		// 新开一个协程去切状态，不增加此次rpc时间
+		go c.changePhase()
+	}
+
+	return nil
+}
+
+// 切换master执行阶段。当前是map阶段，则生成reduce任务；当前是reduce阶段，则关闭newtask channel
+func (c *Coordinator) changePhase() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// 如果未超时，返回成功。否则视为失败，重新分配该任务
-
-	return nil
+	switch c.phase {
+	case Map:
+		for i := 0; i < c.nReduce; i++ {
+			t := Task{
+				taskType: Reduce,
+				index:    i,
+				taskName: genTaskName(Reduce, i),
+				ddl:      time.Now().Add(10 * time.Second),
+			}
+			c.newTasks <- t
+		}
+		c.phase = Reduce
+		break
+	case Reduce:
+		c.phase = ""
+		close(c.newTasks)
+		break
+	default:
+		break
+	}
 }
 
 // 输出文件格式 mr-out-X
