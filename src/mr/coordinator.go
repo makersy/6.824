@@ -38,7 +38,7 @@ const (
 type Task struct {
 	taskType   string    // 任务类型
 	index      int       // 任务生成时的排序
-	taskName   string    // 任务名，type-index，全局唯一
+	taskName   string    // 任务名，type-index-workerId，全局唯一
 	inputFiles []string  // 需要读取的文件
 	workerId   string    // 任务对应的 worker id
 	ddl        time.Time // 预期完成时间
@@ -65,7 +65,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			taskType:   Map,
 			inputFiles: []string{f},
 			index:      i,
-			taskName:   genTaskName(Map, i),
 		}
 		c.newTasks <- t
 	}
@@ -92,8 +91,8 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	return &c
 }
 
-func genTaskName(taskType string, index int) string {
-	return fmt.Sprintf("%v-%v", taskType, index)
+func genTaskName(taskType string, index int, workerId string) string {
+	return fmt.Sprintf("%v-%v-%v", taskType, index, workerId)
 }
 
 // 检查超时的任务，使其失效并重新加入任务池
@@ -125,6 +124,7 @@ func (c *Coordinator) ApplyForTask(args *ApplyTaskArgs, reply *ApplyTaskReply) e
 
 	t.workerId = args.WorkerId
 	t.ddl = time.Now().Add(10 * time.Second)
+	t.taskName = genTaskName(t.taskType, t.index, t.workerId)
 	c.aliveTask[t.taskName] = t
 
 	reply.TaskIndex = t.index
@@ -151,12 +151,12 @@ func (c *Coordinator) NotifyFinished(args *NotifyFinishArgs, reply *NotifyFinish
 	}
 
 	// 如果未超时，返回成功。否则视为失败，重新分配该任务
-	task, ok := c.aliveTask[genTaskName(args.TaskType, args.TaskIndex)]
+	task, ok := c.aliveTask[genTaskName(args.TaskType, args.TaskIndex, args.WorkId)]
 
 	// 任务池没有，说明已经被后台任务认定超时，删除掉了
 	if !ok {
 		log.Printf("NotifyFinished failed because of checked time out. workerId: %v, taskName: %v",
-			args.WorkId, genTaskName(args.TaskType, args.TaskIndex))
+			args.WorkId, genTaskName(args.TaskType, args.TaskIndex, args.WorkId))
 		reply.Success = false
 		return nil
 	}
@@ -164,7 +164,7 @@ func (c *Coordinator) NotifyFinished(args *NotifyFinishArgs, reply *NotifyFinish
 	// 超时
 	if time.Now().After(task.ddl) {
 		log.Printf("NotifyFinished failed because of time out. workerId: %v, taskName: %v",
-			args.WorkId, genTaskName(args.TaskType, args.TaskIndex))
+			args.WorkId, genTaskName(args.TaskType, args.TaskIndex, args.WorkId))
 		c.deleteAndRebuildTask(&task)
 		reply.Success = false
 		return nil
@@ -230,7 +230,6 @@ func (c *Coordinator) changePhase() {
 			t := Task{
 				taskType:   Reduce,
 				index:      i,
-				taskName:   genTaskName(Reduce, i),
 				inputFiles: c.mapOutFiles[i],
 				ddl:        time.Now().Add(10 * time.Second),
 			}
