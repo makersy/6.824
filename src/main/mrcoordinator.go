@@ -9,10 +9,22 @@ package main
 // Please do not change this file.
 //
 
-import "6.824/mr"
+import (
+	"6.824/mr"
+	"log"
+)
 import "time"
 import "os"
 import "fmt"
+
+func init() {
+	// 设置日志文件位置
+	logFile, err := os.OpenFile(`../main.log`, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		panic(err)
+	}
+	log.SetOutput(logFile)
+}
 
 func main() {
 	if len(os.Args) < 2 {

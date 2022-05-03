@@ -16,6 +16,15 @@ import "os"
 import "fmt"
 import "log"
 
+func init() {
+	// 设置日志文件位置
+	logFile, err := os.OpenFile(`../main.log`, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		panic(err)
+	}
+	log.SetOutput(logFile)
+}
+
 func main() {
 	if len(os.Args) != 2 {
 		fmt.Fprintf(os.Stderr, "Usage: mrworker xxx.so\n")
