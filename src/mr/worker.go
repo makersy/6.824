@@ -74,7 +74,8 @@ func Worker(mapf func(string, string) []KeyValue,
 		call("Coordinator.ApplyForTask", &args, &reply)
 
 		if reply.End {
-			log.Fatalf("Worker %s received no task. Quitting...", workerId)
+			log.Printf("Worker %s received no task. Quitting...", workerId)
+			return
 		}
 		if reply.TaskType == Map {
 			tmpFiles := handleMapTask(mapf, workerId, reply)
@@ -184,7 +185,7 @@ func handleReduceTask(reducef func(string, []string) string, workId string, repl
 	for i := 0; i < len(kvs); {
 		// 归并
 		key := kvs[i].Key
-		values := make([]string, 1)
+		values := make([]string, 0)
 		for i < len(kvs) {
 			if kvs[i].Key == key {
 				values = append(values, kvs[i].Value)

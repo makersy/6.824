@@ -81,10 +81,11 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			time.Sleep(500 * time.Millisecond)
 			c.mu.Lock()
 			if c.phase == "" {
+				c.mu.Unlock()
 				return
 			}
-			c.mu.Unlock()
 			c.checkDdl()
+			c.mu.Unlock()
 		}
 	}()
 
@@ -97,9 +98,6 @@ func genTaskName(taskType string, index int) string {
 
 // 检查超时的任务，使其失效并重新加入任务池
 func (c *Coordinator) checkDdl() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	for _, t := range c.aliveTask {
 		if t.taskName != "" && time.Now().After(t.ddl) {
 			log.Printf("Found time-out task, type: %s, genTaskName: %s, WorkerId: %s", t.taskType, t.taskName, t.workerId)
@@ -157,14 +155,19 @@ func (c *Coordinator) NotifyFinished(args *NotifyFinishArgs, reply *NotifyFinish
 
 	// 任务池没有，说明已经被后台任务认定超时，删除掉了
 	if !ok {
-		log.Printf("NotifyFinished failed because got empty args.TmpFiles")
+		log.Printf("NotifyFinished failed because of checked time out. workerId: %v, taskName: %v",
+			args.WorkId, genTaskName(args.TaskType, args.TaskIndex))
 		reply.Success = false
 		return nil
 	}
 
 	// 超时
 	if time.Now().After(task.ddl) {
+		log.Printf("NotifyFinished failed because of time out. workerId: %v, taskName: %v",
+			args.WorkId, genTaskName(args.TaskType, args.TaskIndex))
 		c.deleteAndRebuildTask(&task)
+		reply.Success = false
+		return nil
 	}
 
 	// 将中间文件转正
