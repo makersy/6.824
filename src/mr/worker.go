@@ -69,18 +69,17 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	for {
 		// 获取任务
-		args := ApplyTaskArgs{workerId: workerId}
+		args := ApplyTaskArgs{WorkerId: workerId}
 		reply := ApplyTaskReply{}
 		call("Coordinator.ApplyForTask", &args, &reply)
 
-		if reply.end {
-			log.Printf("Worker %s received no task. Quitting...", workerId)
-			break
+		if reply.End {
+			log.Fatalf("Worker %s received no task. Quitting...", workerId)
 		}
-		if reply.taskType == Map {
+		if reply.TaskType == Map {
 			tmpFiles := handleMapTask(mapf, workerId, reply)
 			notifyMaster(workerId, reply, tmpFiles)
-		} else if reply.taskType == Reduce {
+		} else if reply.TaskType == Reduce {
 			tmpFiles := handleReduceTask(reducef, workerId, reply)
 			notifyMaster(workerId, reply, tmpFiles)
 		}
@@ -94,34 +93,41 @@ func Worker(mapf func(string, string) []KeyValue,
 // 处理Map任务
 func handleMapTask(mapf func(string, string) []KeyValue, workId string, reply ApplyTaskReply) []string {
 	// 文件读取
-	file, err := os.Open(reply.inputFiles[0])
+	file, err := os.Open(reply.InputFiles[0])
 	if err != nil {
-		log.Fatalf("MapTask Worker %s cannot open %v", workId, reply.inputFiles[0])
+		log.Fatalf("MapTask Worker %s cannot open %v", workId, reply.InputFiles[0])
 	}
 	content, err := ioutil.ReadAll(file)
 	if err != nil {
-		log.Fatalf("MapTask Worker %s cannot read %v", workId, reply.inputFiles[0])
+		log.Fatalf("MapTask Worker %s cannot read %v", workId, reply.InputFiles[0])
 	}
 	file.Close()
 
-	keyValues := mapf(reply.inputFiles[0], string(content))
+	keyValues := mapf(reply.InputFiles[0], string(content))
 	rKvMap := make(map[int][]KeyValue)
 
 	// 确定kv应该由哪个reduce任务处理
 	for _, kv := range keyValues {
-		reduceIdx := ihash(kv.Key) % reply.nReduce
+		reduceIdx := ihash(kv.Key) % reply.NReduce
 		rKvMap[reduceIdx] = append(rKvMap[reduceIdx], kv)
 	}
 
-	var tmpFiles = make([]string, reply.nReduce) // 生成的临时文件
+	var tmpFiles = make([]string, reply.NReduce) // 生成的临时文件
 
 	// 写入到每个中间文件
-	for i := 0; i < reply.nReduce; i++ {
+	if !existDir(tempFileDir) {
+		err := os.MkdirAll(tempFileDir, 0777)
+		if err != nil {
+			log.Printf("Mkdir failed")
+		}
+	}
+
+	for i := 0; i < reply.NReduce; i++ {
 		tmpFileName := tempMOutFileName(workId)
 		tmpFile, err := ioutil.TempFile(tempFileDir, tmpFileName)
 
 		if err != nil {
-			log.Fatalf("MapTask Worker %s failed to create intermediate file %v", workId, tmpFileName)
+			log.Fatalf("MapTask Worker %s failed to create temp file %v, err: %v", workId, tmpFileName, err)
 		}
 		encoder := json.NewEncoder(tmpFile)
 
@@ -134,14 +140,15 @@ func handleMapTask(mapf func(string, string) []KeyValue, workId string, reply Ap
 		tmpFile.Close()
 	}
 
-	return nil
+
+	return tmpFiles
 }
 
 // 处理reduce任务
 func handleReduceTask(reducef func(string, []string) string, workId string, reply ApplyTaskReply) []string {
 	kvs := make([]KeyValue, 0)
 
-	for _, mapFileName := range reply.inputFiles {
+	for _, mapFileName := range reply.InputFiles {
 		// 文件读取
 		mapFile, err := os.Open(mapFileName)
 		if err != nil {
@@ -166,9 +173,13 @@ func handleReduceTask(reducef func(string, []string) string, workId string, repl
 	sort.Sort(ByKey(kvs))
 
 	// 归并 & 输出
-	oname := tempROutFile(workId)
-	tmpReduceFiles := []string{oname} // 生成的临时文件
-	ofile, _ := ioutil.TempFile(tempFileDir, oname)
+	tmpFileName := tempROutFile(workId)
+	ofile, err := ioutil.TempFile(tempFileDir, tmpFileName)
+	if err != nil {
+		log.Fatalf("ReduceTask Worker %s failed to create temp file %v, err: %v", workId, tmpFileName, err)
+	}
+
+	tmpReduceFiles := []string{ofile.Name()} // 生成的临时文件
 
 	for i := 0; i < len(kvs); {
 		// 归并
@@ -193,20 +204,32 @@ func handleReduceTask(reducef func(string, []string) string, workId string, repl
 	return tmpReduceFiles
 }
 
+// 判断路径是否存在
+func existDir(path string) bool {
+	_, err := os.Stat(path)
+	if err != nil {
+		if os.IsExist(err) {
+			return true
+		}
+		return false
+	}
+	return true
+}
+
 // 通知master：worker已完成任务。如果被master认定为执行失败，自行将临时文件删除掉
 func notifyMaster(workId string, applyTaskReply ApplyTaskReply, tmpFiles []string) {
 	args := NotifyFinishArgs{
-		taskType:  applyTaskReply.taskType,
-		taskIndex: applyTaskReply.taskIndex,
-		workId:    workId,
-		tmpFiles: tmpFiles,
+		TaskType:  applyTaskReply.TaskType,
+		TaskIndex: applyTaskReply.TaskIndex,
+		WorkId:    workId,
+		TmpFiles:  tmpFiles,
 	}
 	reply := NotifyFinishReply{}
 	call("Coordinator.NotifyFinished", &args, &reply)
 
-	if !reply.success {
+	if !reply.Success {
 		// 删除中间文件
-		switch applyTaskReply.taskType {
+		switch applyTaskReply.TaskType {
 		case Map:
 			log.Printf("Map Worker %s was deemed to be failed task", workId)
 			for _, tmpFile := range tmpFiles {
@@ -268,6 +291,7 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 
 	err = c.Call(rpcname, args, reply)
 	if err == nil {
+		log.Printf("Call %v args: %+v, reply: %+v", rpcname, args, reply)
 		return true
 	}
 

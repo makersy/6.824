@@ -50,12 +50,12 @@ type Task struct {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
-		mu:        sync.Mutex{},
-		phase:     Map,
-		nMap:      len(files),
-		nReduce:   nReduce,
-		aliveTask: make(map[string]Task),
-		newTasks:  make(chan Task, util.Max(len(files), nReduce)),
+		mu:          sync.Mutex{},
+		phase:       Map,
+		nMap:        len(files),
+		nReduce:     nReduce,
+		aliveTask:   make(map[string]Task),
+		newTasks:    make(chan Task, util.Max(len(files), nReduce)),
 		mapOutFiles: make(map[int][]string, nReduce),
 	}
 
@@ -70,13 +70,22 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		c.newTasks <- t
 	}
 
+	log.Printf("MakeCoordinator success. new tasks number: %d", len(c.newTasks))
+
 	// 监听
 	c.server()
 
 	// 定期检查超时任务
 	go func() {
-		time.Sleep(500 * time.Millisecond)
-		c.checkDdl()
+		for {
+			time.Sleep(500 * time.Millisecond)
+			c.mu.Lock()
+			if c.phase == "" {
+				return
+			}
+			c.mu.Unlock()
+			c.checkDdl()
+		}
 	}()
 
 	return &c
@@ -88,14 +97,13 @@ func genTaskName(taskType string, index int) string {
 
 // 检查超时的任务，使其失效并重新加入任务池
 func (c *Coordinator) checkDdl() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	for _, t := range c.aliveTask {
-		if t.taskName != "" && t.ddl.After(time.Now()) {
-			c.mu.Lock()
-
-			log.Printf("Found time-out task, type: %s, genTaskName: %s, workerId: %s", t.taskType, t.taskName, t.workerId)
+		if t.taskName != "" && time.Now().After(t.ddl) {
+			log.Printf("Found time-out task, type: %s, genTaskName: %s, WorkerId: %s", t.taskType, t.taskName, t.workerId)
 			c.deleteAndRebuildTask(&t)
-
-			c.mu.Unlock()
 		}
 	}
 }
@@ -111,22 +119,22 @@ func (c *Coordinator) deleteAndRebuildTask(t *Task) {
 func (c *Coordinator) ApplyForTask(args *ApplyTaskArgs, reply *ApplyTaskReply) error {
 	t, ok := <-c.newTasks
 	if !ok {
-		reply.end = true
+		reply.End = true
 		return nil
 	}
 
 	c.mu.Lock()
 
-	t.workerId = args.workerId
+	t.workerId = args.WorkerId
 	t.ddl = time.Now().Add(10 * time.Second)
 	c.aliveTask[t.taskName] = t
 
-	reply.taskIndex = t.index
-	reply.taskType = t.taskType
-	reply.inputFiles = t.inputFiles
-	reply.nMap = c.nMap
-	reply.nReduce = c.nReduce
-	reply.end = false
+	reply.TaskIndex = t.index
+	reply.TaskType = t.taskType
+	reply.InputFiles = t.inputFiles
+	reply.NMap = c.nMap
+	reply.NReduce = c.nReduce
+	reply.End = false
 
 	c.mu.Unlock()
 
@@ -138,17 +146,19 @@ func (c *Coordinator) NotifyFinished(args *NotifyFinishArgs, reply *NotifyFinish
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if len(args.tmpFiles) == 0 {
-		reply.success = false
+	if len(args.TmpFiles) == 0 {
+		log.Printf("NotifyFinished failed because got empty args.TmpFiles")
+		reply.Success = false
 		return nil
 	}
 
 	// 如果未超时，返回成功。否则视为失败，重新分配该任务
-	task, ok := c.aliveTask[genTaskName(args.taskType, args.taskIndex)]
+	task, ok := c.aliveTask[genTaskName(args.TaskType, args.TaskIndex)]
 
 	// 任务池没有，说明已经被后台任务认定超时，删除掉了
 	if !ok {
-		reply.success = false
+		log.Printf("NotifyFinished failed because got empty args.TmpFiles")
+		reply.Success = false
 		return nil
 	}
 
@@ -160,42 +170,43 @@ func (c *Coordinator) NotifyFinished(args *NotifyFinishArgs, reply *NotifyFinish
 	// 将中间文件转正
 	switch task.taskType {
 	case Map:
-		for i, tmpFile := range args.tmpFiles {
+		for i, tmpFile := range args.TmpFiles {
 			if tmpFile == "" {
-				log.Printf("Found nil temp map file. workerId: %s, map index: %v, reduce index: %v",
-					args.workId, args.taskIndex, i)
+				log.Printf("Found nil temp map file. WorkerId: %s, map index: %v, reduce index: %v",
+					args.WorkId, args.TaskIndex, i)
 				continue
 			}
-			name := mOutFileName(args.taskIndex, i)
+			name := mOutFileName(args.TaskIndex, i)
 			err := os.Rename(tmpFile, name)
 			if err != nil {
 				log.Printf("Failed to rename map file from %s to %s", tmpFile, name)
 				c.deleteAndRebuildTask(&task)
-				reply.success = false
+				reply.Success = false
 				return nil
 			}
 			c.mapOutFiles[i] = append(c.mapOutFiles[i], name)
 		}
 		break
 	case Reduce:
-		tempName := args.tmpFiles[0]
-		name := rOutFileName(args.taskIndex)
+		tempName := args.TmpFiles[0]
+		name := rOutFileName(args.TaskIndex)
 		err := os.Rename(tempName, name)
 		if err != nil {
 			log.Printf("Failed to rename reduce file from %s to %s", tempName, name)
 			c.deleteAndRebuildTask(&task)
-			reply.success = false
+			reply.Success = false
 			return nil
 		}
+		log.Printf("Succeed to rename reduce file from %s to %s", tempName, name)
 		break
 	default:
 		break
 	}
 
 	delete(c.aliveTask, task.taskName)
-	reply.success = true
+	reply.Success = true
 
-	if len(c.aliveTask) == 0 {
+	if len(c.aliveTask) == 0 && len(c.newTasks) == 0 {
 		// 新开一个协程去切状态，不增加此次rpc时间
 		go c.changePhase()
 	}
@@ -207,6 +218,8 @@ func (c *Coordinator) NotifyFinished(args *NotifyFinishArgs, reply *NotifyFinish
 func (c *Coordinator) changePhase() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	log.Printf("Changing phase from %v", c.phase)
 
 	switch c.phase {
 	case Map:
@@ -262,7 +275,11 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.phase == "" {
+		log.Printf("Done")
 		return true
 	}
 

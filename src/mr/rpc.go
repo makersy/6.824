@@ -24,27 +24,27 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 type ApplyTaskArgs struct {
-	workerId string
+	WorkerId string
 }
 
 type ApplyTaskReply struct {
-	taskType  string
-	taskIndex  int
-	inputFiles []string
-	nMap       int  // 获取map中间文件使用
-	nReduce   int  // hash使用
-	end       bool // 是否已结束
+	TaskType   string
+	TaskIndex  int
+	InputFiles []string
+	NMap       int  // 获取map中间文件使用
+	NReduce    int  // hash使用
+	End        bool // 是否已结束
 }
 
 type NotifyFinishArgs struct {
-	taskType  string
-	taskIndex int
-	workId    string
-	tmpFiles  []string // 生成的临时文件名称
+	TaskType  string
+	TaskIndex int
+	WorkId    string
+	TmpFiles  []string // 生成的临时文件名称
 }
 
 type NotifyFinishReply struct {
-	success bool
+	Success bool
 }
 
 // Cook up a unique-ish UNIX-domain socket genTaskName
